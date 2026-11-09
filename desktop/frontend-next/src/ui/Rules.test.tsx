@@ -3,11 +3,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import "./testkit";
+import { boot, STORAGE } from "../i18n";
 import { Rules } from "./Rules";
 import { MockPort } from "../port/mock";
 import type { AgentPort, PermissionRules } from "../port/port";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  localStorage.setItem(STORAGE, "zh");
+  boot();
+});
 
 const rules = (granted: string[]): PermissionRules => ({
   mode: "ask", deny: [], ask: [], allow: [], path: "/home/u/.reasonix/config.toml", granted,
@@ -73,6 +78,34 @@ it("revokes a remembered project rule without asking the user to edit a fingerpr
   await waitFor(() => expect(revokeRememberedProjectRule).toHaveBeenCalledWith("Bash(go test:*)"));
   expect(changed).toHaveBeenCalledOnce();
   expect(screen.queryByText("Bash(go test:*)")).toBeNull();
+});
+
+// The group header's label and its "matched against" line are table values
+// behind t(), so neither catalogue scan sees them.
+it("names grants and matching in the window's language", async () => {
+  localStorage.setItem(STORAGE, "en");
+  boot();
+  const port = {
+    ...(new MockPort() as unknown as AgentPort),
+    permissions: async () => ({ ...rules([]), allow: ["Computer(com.example.Notes)", "Browser(https://example.com)"] }),
+  } as unknown as AgentPort;
+  const { container } = render(<Rules port={port} onChanged={vi.fn()} />);
+  await waitFor(() => expect(container.querySelectorAll(".rgroup").length).toBe(2));
+  const groups = [...container.querySelectorAll(".rgroup")].map((g) => ({
+    tool: g.querySelector(".rg-hd code")?.textContent,
+    what: g.querySelector(".rg-hd .what")?.textContent,
+    how: g.querySelector(".rg-hd .how")?.textContent,
+  }));
+  expect(groups).toContainEqual({
+    tool: "Computer",
+    what: "Applications (authorized one at a time)",
+    how: "matched by application id; an allow needs the full id and a wildcard only restricts",
+  });
+  expect(groups).toContainEqual({
+    tool: "Browser",
+    what: "Browser (authorized one origin at a time)",
+    how: "matched by page origin (scheme://host:port)",
+  });
 });
 
 it("shows a malformed remembered-rules file instead of silently hiding the failure", async () => {

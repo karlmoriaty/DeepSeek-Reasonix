@@ -2,12 +2,17 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import "./testkit";
+import { boot, STORAGE } from "../i18n";
 import { SlottedView } from "./SlottedView";
 import { placement } from "./slots";
 import { ExtensionCard } from "./cards/ExtensionCard";
 import type { ExtensionSurface, ExtensionViewNode } from "../port/wire";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  localStorage.setItem(STORAGE, "zh");
+  boot();
+});
 
 const band = (body: ExtensionViewNode[], slot = "above_prompt"): ExtensionSurface => ({
   pluginId: "statusline-clock", surfaceId: "mod-above-prompt", kind: "view", view: { slot, body },
@@ -48,6 +53,17 @@ describe("the band a mod draws above the prompt", () => {
   it("names the plugin on the control that moves it", () => {
     render(<SlottedView ext={band([{ kind: "text", value: "x" }])} onAction={() => {}} onMove={() => {}} />);
     expect(screen.getByRole("button", { name: "移动 statusline-clock 的界面" })).toBeTruthy();
+  });
+
+  // The slot names live in a table and reach the menu through t(), so neither
+  // catalogue scan sees them.
+  it("names the places it can move to in the window's language", () => {
+    localStorage.setItem(STORAGE, "en");
+    boot();
+    render(<SlottedView ext={band([{ kind: "text", value: "x" }])} onAction={() => {}} onMove={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Move statusline-clock's view" }));
+    expect(screen.getByRole("menuitemradio", { name: "Sidebar" })).toBeTruthy();
+    expect(screen.getByRole("menuitemradio", { name: "Above the composer" })).toBeTruthy();
   });
 });
 

@@ -109,6 +109,8 @@ export const APP: Messages = {
   "app.session_list": { zh: "会话列表", en: "Sessions" },
   "app.sign_in": { zh: "重新登录", en: "Sign in" },
   "app.sign_in_again": { zh: "需要重新登录", en: "Sign in again" },
+  "app.slot_composer_trailing": { zh: "输入框上方", en: "Above the composer" },
+  "app.slot_sidebar": { zh: "侧栏", en: "Sidebar" },
   "app.small": { zh: "小", en: "Small" },
   "app.starting_serve": { zh: "启动 serve", en: "Starting serve" },
   "app.still_working": { zh: "还在做", en: "Still working" },

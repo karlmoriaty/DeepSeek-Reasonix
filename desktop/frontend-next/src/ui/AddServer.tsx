@@ -14,9 +14,9 @@ npx -y chrome-devtools-mcp@latest
 https://mcp.example.com/sse`;
 
 const KIND_LABEL: Record<string, string> = {
-  shell: "将在本机运行",
+  shell: "ext.will_run_on_this_machine",
   "unknown-host": "ext.will_connect_to",
-  secret: "密钥",
+  secret: "ext.secret",
 };
 
 interface Props {

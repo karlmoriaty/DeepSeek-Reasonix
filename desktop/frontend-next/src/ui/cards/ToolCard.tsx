@@ -521,15 +521,16 @@ const tagFor = (tool: Tool): string | null => {
 };
 
 const SHELL_HINT: Record<string, string> = {
-  bash: "命令交给 bash 执行",
-  "git-bash": "命令交给 Git Bash 执行",
-  pwsh: "命令交给 PowerShell 7 执行 —— 语法是 PowerShell，不是 bash",
-  powershell: "本机没有 bash，命令交由 Windows PowerShell 执行 —— 它不支持 && 和 ||",
+  bash: "chat.shell_hint_bash",
+  "git-bash": "chat.shell_hint_git_bash",
+  pwsh: "chat.shell_hint_pwsh",
+  powershell: "chat.shell_hint_powershell",
 };
 
 const tagHint = (tool: Tool) => {
   const ex = tool.execution;
-  return ex?.kind === "shell" && ex.shell ? SHELL_HINT[ex.shell] : undefined;
+  const key = ex?.kind === "shell" && ex.shell ? SHELL_HINT[ex.shell] : undefined;
+  return key ? t(key) : undefined;
 };
 
 // Only the categories the spec gives a colour to; the rest stay neutral.
