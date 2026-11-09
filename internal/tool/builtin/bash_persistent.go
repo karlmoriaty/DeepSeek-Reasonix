@@ -128,11 +128,20 @@ func (b bash) runPersistent(ctx context.Context, p bashParams, sh sandbox.Shell,
 		progress = shellrun.NewProgressWriter(emit)
 	}
 	defer progress.Flush()
+	// The persistent shell starts its own MSYS runtime, so it must start on the
+	// host temp and receive the session temp as an export, exactly like a
+	// one-shot launch (#15023).
+	env := launch.EnvOverrides
+	command := p.Command
+	if bashNeedsHostTemp(sh, prepared.SessionTemp) {
+		env = withoutSessionTempKeys(env)
+		command = bashSessionTempPrelude(prepared.SessionTemp) + command
+	}
 	res := m.Run(ctx, persistentshell.Request{
 		Argv:     launch.Argv,
 		Dir:      b.workDir,
-		Env:      applyEnvOverrides(cmdEnv, launch.EnvOverrides),
-		Command:  p.Command,
+		Env:      applyEnvOverrides(cmdEnv, env),
+		Command:  command,
 		Timeout:  b.foregroundTimeoutFor(p),
 		Shell:    sh,
 		Progress: progress,

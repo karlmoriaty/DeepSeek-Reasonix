@@ -296,13 +296,24 @@ func (b bash) prepareLaunch(ctx context.Context, sh sandbox.Shell, command strin
 	spec := b.specForCall(ctx)
 	effectiveSessionDir := sessionDir
 	spec.SessionTemp = effectiveSessionDir
-	argv, wrapped := bashSandboxCommand(spec, sh, command)
+	// MSYS binds /tmp from the first process's TEMP/TMP for the whole runtime,
+	// so a shell started on a session directory leaves later shells without
+	// /tmp once it is deleted (#15023). Start it on the host temp instead.
+	launchCommand := command
+	if bashNeedsHostTemp(sh, effectiveSessionDir) {
+		launchCommand = bashSessionTempPrelude(effectiveSessionDir) + command
+	}
+	argv, wrapped := bashSandboxCommand(spec, sh, launchCommand)
 	linuxSB := wrapped && effectiveSessionDir != "" && runtime.GOOS == "linux"
+	envOverrides := sandbox.SessionTempEnv(effectiveSessionDir, linuxSB)
+	if bashNeedsHostTemp(sh, effectiveSessionDir) {
+		envOverrides = withoutSessionTempKeys(envOverrides)
+	}
 	prepared := sandbox.Prepared{
 		Argv:           argv,
 		Wrapped:        wrapped,
 		SessionTemp:    effectiveSessionDir,
-		EnvOverrides:   sandbox.SessionTempEnv(effectiveSessionDir, linuxSB),
+		EnvOverrides:   envOverrides,
 		LinuxSandboxed: linuxSB,
 	}
 

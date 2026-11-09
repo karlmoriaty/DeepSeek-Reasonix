@@ -172,3 +172,98 @@ func TestBashBackgroundLeaseSurvivesRotate(t *testing.T) {
 	}
 	fresh.Release()
 }
+
+func TestWindowsBashStartsOnHostTemp(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("MSYS /tmp binding is Windows-only")
+	}
+	sh := sandbox.Shell{Kind: sandbox.ShellBash, Path: "bash"}
+	m := sessiontemp.NewWithRoot(t.TempDir())
+	m.Retain()
+	defer m.Release()
+	b := bash{sb: sandbox.Spec{Mode: "off"}, shell: sh, workDir: t.TempDir(), sessionTemp: m}
+
+	prepared, lease, err := b.prepareLaunch(fullAccessBashTestContext(t.Context()), sh, `printf '%s' "$TMPDIR"`, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+
+	dir := lease.Dir()
+	posix := "/" + strings.ToLower(dir[:1]) + strings.ReplaceAll(dir[2:], `\`, "/")
+	for _, kv := range prepared.EnvOverrides {
+		key, _, _ := strings.Cut(kv, "=")
+		if key == "TMPDIR" || key == "TMP" || key == "TEMP" {
+			t.Fatalf("bash process env still carries a session temp entry: %q", kv)
+		}
+	}
+	if !slices.ContainsFunc(prepared.EnvOverrides, func(kv string) bool { return strings.HasPrefix(kv, "GOCACHE=") }) {
+		t.Fatalf("session-private cache keys must stay in the environment: %v", prepared.EnvOverrides)
+	}
+	joined := strings.Join(prepared.Argv, " ")
+	if !strings.Contains(joined, "export TMPDIR='"+posix+"'") {
+		t.Fatalf("argv does not export the session temp in POSIX form: %v", prepared.Argv)
+	}
+	if !strings.Contains(joined, "printf") {
+		t.Fatalf("argv lost the requested command: %v", prepared.Argv)
+	}
+}
+
+func TestWindowsBashSessionTempSurvivesQuotedPath(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("MSYS /tmp binding is Windows-only")
+	}
+	sh, ok := sandbox.ResolveExplicitBash("")
+	if !ok {
+		t.Skip("Git Bash is required for the native Windows regression")
+	}
+	root := filepath.Join(t.TempDir(), "it's private")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	m := sessiontemp.NewWithRoot(root)
+	m.Retain()
+	defer m.Release()
+	b := bash{sb: sandbox.Spec{Mode: "off"}, shell: sh, workDir: t.TempDir(), sessionTemp: m}
+
+	out, err := b.Execute(fullAccessBashTestContext(t.Context()), argsJSON(t, map[string]any{"command": `printf '%s' "$TMPDIR"`}))
+	if err != nil {
+		t.Fatalf("printf: %v (%q)", err, out)
+	}
+	dir := m.Dir()
+	want := "/" + strings.ToLower(dir[:1]) + strings.ReplaceAll(dir[2:], `\`, "/")
+	if out != want {
+		t.Fatalf("$TMPDIR = %q, want %q", out, want)
+	}
+}
+
+func TestWindowsBashPersistentShellKeepsSessionTemp(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("MSYS /tmp binding is Windows-only")
+	}
+	sh, ok := sandbox.ResolveExplicitBash("")
+	if !ok {
+		t.Skip("Git Bash is required for the native Windows regression")
+	}
+	m := sessiontemp.NewWithRoot(t.TempDir())
+	m.Retain()
+	defer m.Release()
+	b := persistentBash(t, t.TempDir())
+	b.shell = sh
+	b.sessionTemp = m
+	ctx := fullAccessBashTestContext(t.Context())
+
+	out, err := b.Execute(ctx, argsJSON(t, map[string]any{"command": `printf '%s' "$TMPDIR"`}))
+	if err != nil {
+		t.Fatalf("first command: %v (%q)", err, out)
+	}
+	dir := m.Dir()
+	posix := "/" + strings.ToLower(dir[:1]) + strings.ReplaceAll(dir[2:], `\`, "/")
+	if out != posix {
+		t.Fatalf("persistent $TMPDIR = %q, want %q", out, posix)
+	}
+	out, err = b.Execute(ctx, argsJSON(t, map[string]any{"command": `test -d "$TMPDIR" && test "$TMPDIR" = "$TEMP" && printf alive`}))
+	if err != nil || !strings.Contains(out, "alive") {
+		t.Fatalf("session temp not usable in the persistent shell: %q error=%v", out, err)
+	}
+}
