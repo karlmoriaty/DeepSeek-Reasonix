@@ -2,8 +2,11 @@ package builtin
 
 import (
 	"maps"
+	"runtime"
 	"slices"
 	"strings"
+
+	"reasonix/internal/safety/sandbox"
 )
 
 // shellEnvOverrides renders the configured [tools.shell] env as sorted KEY=value
@@ -26,6 +29,52 @@ func shellEnvOverrides(env map[string]string) []string {
 		out = append(out, k+"="+env[k])
 	}
 	return out
+}
+
+// bashNeedsHostTemp reports whether the shell must start without the session
+// temporary directory in its environment. MSYS reads TEMP/TMP once, when the
+// first process of its shared runtime starts, and binds /tmp there for every
+// later process, so a session directory would leave every command warning that
+// /tmp is missing after deletion (#15023). Launcher shells have no MSYS mount.
+func bashNeedsHostTemp(sh sandbox.Shell, sessionDir string) bool {
+	return runtime.GOOS == "windows" && sh.Kind == sandbox.ShellBash && len(sh.Args()) == 0 && sessionDir != ""
+}
+
+// bashSessionTempPrelude re-exports the session temporary directory inside the
+// shell, after MSYS has resolved /tmp from the stable host temp. The value is
+// POSIX, as MSYS itself presents a Windows TEMP to bash. Placed on its own line
+// so a command that starts with a comment cannot absorb it.
+func bashSessionTempPrelude(dir string) string {
+	quoted := "'" + strings.ReplaceAll(bashTempPath(dir), "'", `'\''`) + "'"
+	return "export TMPDIR=" + quoted + " TMP=" + quoted + " TEMP=" + quoted + "\n"
+}
+
+// bashTempPath renders a Windows directory the way MSYS exposes it to bash, so
+// exporting it inside the shell reads the same as the environment MSYS would
+// have converted at startup.
+func bashTempPath(dir string) string {
+	if len(dir) >= 3 && dir[1] == ':' && (dir[2] == '\\' || dir[2] == '/') {
+		return "/" + strings.ToLower(dir[:1]) + strings.ReplaceAll(dir[2:], `\`, "/")
+	}
+	if strings.HasPrefix(dir, `\\`) {
+		return strings.ReplaceAll(dir, `\`, "/")
+	}
+	return dir
+}
+
+// withoutSessionTempKeys drops the three temporary-directory variables from the
+// child environment; on Windows+bash their values come from the prelude. Cache
+// keys in SessionTempEnvKeys stay, so session-private caches keep working.
+func withoutSessionTempKeys(overrides []string) []string {
+	kept := overrides[:0]
+	for _, kv := range overrides {
+		key, _, _ := strings.Cut(kv, "=")
+		if key == "TMPDIR" || key == "TMP" || key == "TEMP" {
+			continue
+		}
+		kept = append(kept, kv)
+	}
+	return kept
 }
 
 // shellEnvKeyEqual is the key identity the fold uses. It is a seam so a test can

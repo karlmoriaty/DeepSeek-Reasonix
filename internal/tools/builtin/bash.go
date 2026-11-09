@@ -348,6 +348,13 @@ func (b bash) prepareLaunch(ctx context.Context, sh sandbox.Shell, p bashParams,
 		sessionDir = l.Dir()
 	}
 
+	// MSYS binds /tmp from the first process's TEMP/TMP and keeps that path for
+	// the whole runtime, so a shell started on a session directory leaves every
+	// later shell with a deleted /tmp (#15023). Start it on the host temp.
+	if bashNeedsHostTemp(sh, sessionDir) {
+		launch = bashSessionTempPrelude(sessionDir) + launch
+	}
+
 	// bashSandboxCommand is injectable for tests; production points at
 	// sandbox.Command. Attach SessionTemp so Linux bwrap binds the private dir.
 	spec := b.sb
@@ -390,6 +397,9 @@ func (b bash) prepareLaunch(ctx context.Context, sh sandbox.Shell, p bashParams,
 		prepared.Wrapped = false
 		prepared.LinuxSandboxed = false
 		prepared.EnvOverrides = sandbox.SessionTempEnv(sessionDir, false)
+	}
+	if bashNeedsHostTemp(sh, sessionDir) {
+		prepared.EnvOverrides = withoutSessionTempKeys(prepared.EnvOverrides)
 	}
 	if err := refuseLinkedGitMetadata(prepared.Wrapped, spec, lease); err != nil {
 		return sandbox.Prepared{}, probe, nil, err
