@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"reasonix/internal/runtime/taskmonitor"
@@ -12,6 +13,13 @@ import (
 	"reasonix/internal/state/sessionstore"
 	"reasonix/internal/tools/jobs"
 )
+
+// turnPolicy holds the flags that decide how a turn is admitted and what it
+// restates; both are fixed before the turn starts.
+type turnPolicy struct {
+	restateProjection        atomic.Bool
+	externalBackgroundResume atomic.Bool
+}
 
 // hostContinuationSource labels inbox items the runtime authored for itself.
 const hostContinuationSource = "host:background-job"
@@ -69,7 +77,7 @@ func (c *Controller) SetExternalBackgroundResume(external bool) {
 	if c == nil {
 		return
 	}
-	c.externalBackgroundResume.Store(external)
+	c.turnFlags.externalBackgroundResume.Store(external)
 }
 
 // OnJobCompletion implements jobs.CompletionObserver: a terminal background job
@@ -105,7 +113,7 @@ func (c *Controller) OnJobCompletion(_ context.Context, ev jobs.CompletionEvent)
 		Submit:      submit,
 		Source:      hostContinuationSource,
 		Idempotency: ev.ID,
-	}, !c.externalBackgroundResume.Load())
+	}, !c.turnFlags.externalBackgroundResume.Load())
 	return err
 }
 

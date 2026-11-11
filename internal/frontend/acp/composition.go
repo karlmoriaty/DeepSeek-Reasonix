@@ -51,15 +51,11 @@ func (s *service) newPersistedSession(ctx context.Context, p SessionParams, path
 	return adoptSessionPolicy(ctrl, p.Sink), err
 }
 
-// adoptSessionPolicy applies the policy an ACP session controller shares,
-// whichever path built it. A client that declared job completions learns about
-// a finished background job from its own notification and decides when the
-// session should work again, so the completion must not start a turn behind its
-// back. Clients that did not ask for those updates keep the automatic wake-up.
-//
-// The capability is read from the session's own update sink, never from the
-// service: rebuild and reload paths already hold the service lock while the
-// replacement is built.
+// adoptSessionPolicy gives an ACP controller the policy its session shares: a
+// client that declared job completions learns about a finished job from its own
+// notification and decides when the session works again, so the completion must
+// not start a turn behind its back. The capability comes from the session's
+// update sink, because rebuild paths already hold the service lock.
 func adoptSessionPolicy(ctrl *control.Controller, sink event.Sink) *control.Controller {
 	updates, _ := sink.(*updateSink)
 	if ctrl != nil && updates != nil && updates.jobCompletionsSupported() {

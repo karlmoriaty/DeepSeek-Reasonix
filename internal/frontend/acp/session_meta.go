@@ -17,6 +17,42 @@ import (
 	"reasonix/internal/contract/provider"
 )
 
+// acpSessionMeta is the sidecar record one session keeps between connections.
+type acpSessionMeta struct {
+	SessionID         string                    `json:"sessionId"`
+	Cwd               string                    `json:"cwd"`
+	Model             string                    `json:"model,omitempty"`
+	EffortOverride    *string                   `json:"effortOverride,omitempty"`
+	RuntimeProfile    string                    `json:"runtimeProfile,omitempty"`
+	ToolApprovalMode  string                    `json:"toolApprovalMode,omitempty"`
+	CollaborationMode string                    `json:"collaborationMode,omitempty"`
+	Title             string                    `json:"title,omitempty"`
+	CreatedAt         time.Time                 `json:"createdAt"`
+	UpdatedAt         time.Time                 `json:"updatedAt"`
+	Status            *persistedStatusTelemetry `json:"status,omitempty"`
+	// ActiveTranscript is the basename of the transcript the session currently
+	// lives in after a recovery moved it onto a branch; lookups follow it
+	// instead of reopening the pre-recovery file.
+	ActiveTranscript string `json:"activeTranscript,omitempty"`
+	// PendingJobCompletions are job_completed updates a disconnected client has
+	// not received yet. They are delivered on the next load, resume, or prompt.
+	PendingJobCompletions []ReasonixJobCompleted `json:"pendingJobCompletions,omitempty"`
+}
+
+func (m acpSessionMeta) info(extra map[string]any) SessionInfo {
+	updatedAt := ""
+	if !m.UpdatedAt.IsZero() {
+		updatedAt = m.UpdatedAt.Format(time.RFC3339Nano)
+	}
+	return SessionInfo{
+		SessionID: m.SessionID,
+		Cwd:       m.Cwd,
+		Title:     m.Title,
+		UpdatedAt: updatedAt,
+		Meta:      extra,
+	}
+}
+
 func (s *acpSession) saveMetaIfPresent() {
 	s.mu.Lock()
 	path := s.transcript

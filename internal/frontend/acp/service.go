@@ -273,9 +273,8 @@ type acpSession struct {
 	// idle config rebuild, is in flight outside mu.
 	maintenanceDone chan struct{}
 	// pendingJobs are job_completed updates the client has not received yet,
-	// because the transport refused them or it was not connected when the job
-	// ended. They are also persisted with the session meta, so a restart can
-	// still deliver them on the next load. Guarded by mu.
+	// persisted with the session meta so a restart can still deliver them on
+	// the next load. Guarded by mu.
 	pendingJobs []ReasonixJobCompleted
 }
 
@@ -550,11 +549,7 @@ func (s *service) openExistingSession(ctx context.Context, method, id, cwdParam 
 		return SessionConfigState{}, &RPCError{Code: ErrInternal, Message: method + ": " + err.Error()}
 	}
 
-	sink := newUpdateSink(s.conn, id)
-	sink.bindCwd(cwd)
-	sink.bindExtensionSurface(s.extensionSurfaceSupported())
-	sink.bindJobCompletions(s.jobCompletionsSupported())
-	sink.bindElicitation(s.clientCapabilities())
+	sink := s.newBoundSink(id, cwd)
 	sessionParams := SessionParams{
 		Cwd:                cwd,
 		MCPServers:         mcpServers,
@@ -649,8 +644,7 @@ func (s *service) openExistingSession(ctx context.Context, method, id, cwdParam 
 		lease:          lease,
 	}
 	s.bindSessionHealthEvents(sess)
-	sink.bindJobs(func() any { return sess.currentCtrl() }, sess.queueJobCompletion)
-	sess.pendingJobs = append([]ReasonixJobCompleted(nil), meta.PendingJobCompletions...)
+	sess.bindJobSink(meta.PendingJobCompletions)
 	if err := saveACPMeta(path, sess.meta()); err != nil {
 		sess.releaseSessionLease()
 		ctrl.Close()
@@ -1393,44 +1387,6 @@ func invokeExtensionAction(ctx context.Context, ctrl acpController, line string)
 		return "", false
 	}
 	return message, true
-}
-
-type acpSessionMeta struct {
-	SessionID         string                    `json:"sessionId"`
-	Cwd               string                    `json:"cwd"`
-	Model             string                    `json:"model,omitempty"`
-	EffortOverride    *string                   `json:"effortOverride,omitempty"`
-	RuntimeProfile    string                    `json:"runtimeProfile,omitempty"`
-	ToolApprovalMode  string                    `json:"toolApprovalMode,omitempty"`
-	CollaborationMode string                    `json:"collaborationMode,omitempty"`
-	Title             string                    `json:"title,omitempty"`
-	CreatedAt         time.Time                 `json:"createdAt"`
-	UpdatedAt         time.Time                 `json:"updatedAt"`
-	Status            *persistedStatusTelemetry `json:"status,omitempty"`
-	// ActiveTranscript, when set on the id-keyed sidecar, is the basename of
-	// the transcript this session currently lives in: a snapshot recovery
-	// moved the live session onto a recovery branch and left this redirect
-	// behind so restart-time lookups (resolveTranscriptPath) follow the
-	// session instead of reopening the pre-recovery file.
-	ActiveTranscript string `json:"activeTranscript,omitempty"`
-	// PendingJobCompletions are job_completed updates a disconnected client has
-	// not received yet. They are delivered on the next session/load, resume, or
-	// prompt, then dropped.
-	PendingJobCompletions []ReasonixJobCompleted `json:"pendingJobCompletions,omitempty"`
-}
-
-func (m acpSessionMeta) info(extra map[string]any) SessionInfo {
-	updatedAt := ""
-	if !m.UpdatedAt.IsZero() {
-		updatedAt = m.UpdatedAt.Format(time.RFC3339Nano)
-	}
-	return SessionInfo{
-		SessionID: m.SessionID,
-		Cwd:       m.Cwd,
-		Title:     m.Title,
-		UpdatedAt: updatedAt,
-		Meta:      extra,
-	}
 }
 
 func validateSessionID(method, id string) error {

@@ -124,11 +124,7 @@ func (s *service) sessionNew(ctx context.Context, raw json.RawMessage) (any, err
 	if err != nil {
 		return nil, sessionOpenError("session/new", err)
 	}
-	sink := newUpdateSink(s.conn, id)
-	sink.bindCwd(cwd)
-	sink.bindExtensionSurface(s.extensionSurfaceSupported())
-	sink.bindJobCompletions(s.jobCompletionsSupported())
-	sink.bindElicitation(s.clientCapabilities())
+	sink := s.newBoundSink(id, cwd)
 	sessionParams := SessionParams{
 		Cwd:                cwd,
 		MCPServers:         mcpServers,
@@ -171,7 +167,7 @@ func (s *service) sessionNew(ctx context.Context, raw json.RawMessage) (any, err
 		updatedAt:      now,
 	}
 	s.bindSessionHealthEvents(sess)
-	sink.bindJobs(func() any { return sess.currentCtrl() }, sess.queueJobCompletion)
+	sess.bindJobSink(nil)
 	// Pin a transcript file keyed by session id when the controller has a session
 	// dir, so every turn auto-saves there, session/prompt can hand the path back,
 	// and session/load can find it again by id across process restarts. The
@@ -313,11 +309,7 @@ func (s *service) sessionLoad(ctx context.Context, raw json.RawMessage) (any, er
 			s.sendAvailableCommands(sess)
 			s.sendUsageUpdate(sess)
 			s.publishMCPStatus(sess)
-			if sess != nil {
-				// A job that ended while the client was away is delivered on the
-				// reconnect that brought it back.
-				sess.flushJobCompletions()
-			}
+			sess.flushJobCompletions()
 		},
 	}, nil
 }
@@ -350,9 +342,7 @@ func (s *service) sessionResume(ctx context.Context, raw json.RawMessage) (any, 
 			s.sendAvailableCommands(sess)
 			s.sendUsageUpdate(sess)
 			s.publishMCPStatus(sess)
-			if sess != nil {
-				sess.flushJobCompletions()
-			}
+			sess.flushJobCompletions()
 		},
 	}, nil
 }
@@ -374,10 +364,9 @@ func (s *service) sessionPrompt(ctx context.Context, raw json.RawMessage) (any, 
 	if err != nil {
 		return nil, &RPCError{Code: ErrInvalidParams, Message: "session/prompt: " + err.Error()}
 	}
-	// An empty prompt resumes a session parked at awaiting_jobs: the queued host
-	// continuation holds the result, and the client has nothing to type. Empty
-	// stays invalid when there is nothing to resume, so it cannot start a turn
-	// that does no work.
+	// An empty prompt resumes a session parked at awaiting_jobs: the queued
+	// continuation holds the result. Empty stays invalid when nothing is
+	// waiting, so it cannot start a turn that does no work.
 	resume := false
 	if text == "" {
 		if !sessionResumeReady(sess) {

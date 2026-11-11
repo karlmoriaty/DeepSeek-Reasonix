@@ -62,7 +62,7 @@ func (c *Controller) bindProjectionSeer(newest func(string) (string, bool), note
 // until a turn is handed to the runner. A switched model inherits another
 // model's delivery, so the replacement restates the blocks once (see Restate).
 func (c *Controller) deliveredNewest(tag string) (string, bool) {
-	if c == nil || c.restateProjection.Load() || c.executor == nil {
+	if c == nil || c.turnFlags.restateProjection.Load() || c.executor == nil {
 		return "", false
 	}
 	return c.executor.NewestStandingBlock(tag)
@@ -70,7 +70,7 @@ func (c *Controller) deliveredNewest(tag string) (string, bool) {
 
 // deliveredSees is deliveredNewest's question for the one-time notes.
 func (c *Controller) deliveredSees(text string) bool {
-	if c == nil || c.restateProjection.Load() || c.executor == nil {
+	if c == nil || c.turnFlags.restateProjection.Load() || c.executor == nil {
 		return false
 	}
 	return c.executor.SeesProjection(text)
@@ -83,13 +83,13 @@ func (c *Controller) RestateStandingProjection() {
 	if c == nil {
 		return
 	}
-	c.restateProjection.Store(true)
+	c.turnFlags.restateProjection.Store(true)
 }
 
 // settleProjection records that a composed turn is being handed to the runner.
 // From here on the visible history is the record of what this runtime delivered.
 func (c *Controller) settleProjection() {
-	c.restateProjection.Store(false)
+	c.turnFlags.restateProjection.Store(false)
 }
 
 // deliveryNotes binds the one-time facts a turn also carries. They are not

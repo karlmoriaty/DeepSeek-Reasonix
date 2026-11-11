@@ -1,15 +1,14 @@
 package acp
 
-// Background jobs that outlive a turn. ACP clients may park the agent once a
-// turn ends with jobs pending (see ReasonixTurnOutcome.Kind "awaiting_jobs"),
-// so the completion has to reach them as its own update and the session must
-// stay resumable through an ordinary session/prompt.
+// Background jobs that outlive a turn: the completion is its own update, and
+// an empty prompt resumes the queued result.
 
 import (
 	"strings"
 	"time"
 
 	"reasonix/internal/contract/event"
+	"reasonix/internal/session/control"
 	"reasonix/internal/state/sessioninbox"
 	"reasonix/internal/tools/jobs"
 )
@@ -54,6 +53,80 @@ type ReasonixJobCompleted struct {
 	// so a client can style the row without parsing the status.
 	Level     string `json:"level,omitempty"`
 	Completed string `json:"completedAt,omitempty"`
+}
+
+// ReasonixJobRef names one background job that outlived the turn, so a client
+// knows what the session is waiting on before it parks the agent.
+type ReasonixJobRef struct {
+	ID        string `json:"id"`
+	Command   string `json:"command,omitempty"`
+	StartedAt string `json:"startedAt,omitempty"`
+}
+
+// finishTurnWithJobs is finishTurn for a turn that may have left background
+// jobs running. A clean end with jobs pending is awaiting_jobs rather than
+// completed: the model stopped talking, but the work it handed off has not
+// finished, and a client that took "completed" literally would close the
+// ticket while CI still runs.
+func (t *statusTelemetry) finishTurnWithJobs(runErr error, cancelled bool, goalStatus, summary string, awaiting []ReasonixJobRef) string {
+	eventName := "completion"
+	t.mutate(func(t *statusTelemetry) {
+		t.state = "idle"
+		t.finalReadiness.Summary = clipStatusText(summary, 16_384)
+		t.finalReadiness.Risks = []string{}
+		t.goalOverride = ""
+		switch {
+		case cancelled:
+			t.phase = "cancelled"
+			t.turnOutcome = ReasonixTurnOutcome{Kind: "cancelled"}
+			t.goalOverride = "cancelled"
+			eventName = "completion"
+		case runErr == nil && goalStatus == control.GoalStatusComplete:
+			if len(awaiting) > 0 {
+				t.phase = "awaiting_jobs"
+				t.turnOutcome = ReasonixTurnOutcome{Kind: "awaiting_jobs", Jobs: awaiting}
+				eventName = "pause"
+			} else {
+				t.phase = "review_ready"
+				t.turnOutcome = ReasonixTurnOutcome{Kind: "completed"}
+				t.finalReadiness.ReadyForReview = true
+			}
+		case runErr == nil && (goalStatus == "" || goalStatus == control.GoalStatusStopped):
+			if len(awaiting) > 0 {
+				t.phase = "awaiting_jobs"
+				t.turnOutcome = ReasonixTurnOutcome{Kind: "awaiting_jobs", Jobs: awaiting}
+				eventName = "pause"
+			} else {
+				t.phase = "completed"
+				t.turnOutcome = ReasonixTurnOutcome{Kind: "completed"}
+				t.finalReadiness.ReadyForReview = true
+			}
+		case goalStatus == control.GoalStatusBlocked:
+			t.phase = "paused"
+			t.turnOutcome = ReasonixTurnOutcome{Kind: "paused", Reason: "goal blocked"}
+			eventName = "pause"
+		default:
+			switch {
+			case runErr != nil:
+				t.phase = "error"
+				t.turnOutcome = ReasonixTurnOutcome{Kind: "error", Reason: clipStatusText(runErr.Error(), 2_048)}
+				t.goalOverride = "failed"
+				eventName = "error"
+			default:
+				t.phase = "paused"
+				t.turnOutcome = ReasonixTurnOutcome{Kind: "paused", Reason: "goal is not complete"}
+				eventName = "pause"
+			}
+		}
+	})
+	return eventName
+}
+
+// bindJobSink installs the live-controller lookup and restores completions the
+// client missed on a previous connection.
+func (s *acpSession) bindJobSink(pending []ReasonixJobCompleted) {
+	s.sink.bindJobs(func() any { return s.currentCtrl() }, s.queueJobCompletion)
+	s.pendingJobs = append([]ReasonixJobCompleted(nil), pending...)
 }
 
 // acpJobController is the slice of the controller the job notices need. It is
@@ -281,6 +354,9 @@ func (s *acpSession) queueJobCompletion(payload ReasonixJobCompleted) {
 // delivered, which is all a resume turn needs to tell "nothing was waiting"
 // from "the client is still gone".
 func (s *acpSession) flushJobCompletions() int {
+	if s == nil {
+		return 0
+	}
 	if !s.sink.jobCompletionsSupported() {
 		return 0
 	}

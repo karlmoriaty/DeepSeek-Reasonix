@@ -94,14 +94,8 @@ type Controller struct {
 	guardianPath string // persisted guardian session file ("" when disabled)
 	systemPrompt string
 	commands     atomic.Pointer[[]command.Command]
-	// restateProjection answers "not visible" until a turn is handed to the
-	// runner; a model switch sets it. See projection_debt.go.
-	restateProjection atomic.Bool
-	// externalBackgroundResume leaves the turn a finished background job opens
-	// to the frontend. ACP clients ask for that: they learn about the completion
-	// from the job notice and decide when the session should work again, instead
-	// of a turn starting behind their back.
-	externalBackgroundResume atomic.Bool
+	// turn holds the flags a turn reads when it starts or restates.
+	turnFlags turnPolicy
 	// hookContexts carries one-shot lifecycle hook context into the next real
 	// user turn without changing the cache-stable system prompt.
 	hookContexts []string
