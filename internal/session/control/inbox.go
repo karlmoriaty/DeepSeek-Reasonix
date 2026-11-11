@@ -743,7 +743,7 @@ func (c *Controller) TryEnqueueAndSteer(req InboxRequest) (sessioninbox.InboxRec
 	if err != nil {
 		return rec, err
 	}
-	return c.steerInboxItem(rec.ItemID, true)
+	return c.steerInboxItem(rec.ItemID, true, true)
 }
 
 // TryEnqueueFollowup durably queues a follow-up and may dispatch if idle.

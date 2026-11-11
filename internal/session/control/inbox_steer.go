@@ -72,9 +72,9 @@ func holdWhilePaused(st *sessioninbox.Store, id string, capacity sessioninbox.Ca
 	return sessioninbox.InboxReceipt{ItemID: id, Disposition: sessioninbox.DispositionQueuedFollowup, Paused: true, Capacity: capacity}, nil
 }
 
-func (c *Controller) unlockInboxSteerAdmission(dispatch *bool) {
+func (c *Controller) unlockInboxSteerAdmission(dispatch *bool, allow bool) {
 	c.inbox.admissionMu.Unlock()
-	if *dispatch {
+	if *dispatch && allow {
 		c.maybeDispatchInbox()
 	}
 }
@@ -85,15 +85,17 @@ func (c *Controller) unlockInboxSteerAdmission(dispatch *bool) {
 // The agent loader only captures the item ID and re-reads the blob on consume
 // so large steer bodies do not accumulate in the agent heap.
 func (c *Controller) TrySteerInboxItem(id string) (sessioninbox.InboxReceipt, error) {
-	return c.steerInboxItem(id, false)
+	return c.steerInboxItem(id, false, true)
 }
 
 // steerInboxItem is TrySteerInboxItem; holdIfPaused makes a paused queue keep
 // the item as a follow-up instead of refusing, under the same admission lock.
-func (c *Controller) steerInboxItem(id string, holdIfPaused bool) (sessioninbox.InboxReceipt, error) {
+// wake=false leaves a rejected steer durable without kicking the dispatcher, so
+// a frontend that owns turn admission is the one that submits it.
+func (c *Controller) steerInboxItem(id string, holdIfPaused, wake bool) (sessioninbox.InboxReceipt, error) {
 	c.inbox.admissionMu.Lock()
 	dispatchAfterUnlock := false
-	defer c.unlockInboxSteerAdmission(&dispatchAfterUnlock)
+	defer c.unlockInboxSteerAdmission(&dispatchAfterUnlock, wake)
 	st, err := c.ensureInbox()
 	if err != nil {
 		return sessioninbox.InboxReceipt{}, err

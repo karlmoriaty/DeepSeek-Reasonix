@@ -164,7 +164,7 @@ func (c *Controller) SubmitSurfaceAction(req SurfaceActionRequest, via *provider
 		}
 	}
 	if req.Delivery == "steer" {
-		return c.steerInboxItem(rec.ItemID, true)
+		return c.steerInboxItem(rec.ItemID, true, true)
 	}
 	if !c.Running() {
 		c.maybeDispatchInbox()

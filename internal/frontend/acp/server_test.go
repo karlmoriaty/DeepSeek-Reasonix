@@ -179,7 +179,8 @@ func (f *configurableFactory) NewSession(_ context.Context, p SessionParams) (*c
 		opts.Hooks = f.hookRunner()
 	}
 	if f.managers != nil {
-		jm := jobs.NewManager(event.Discard)
+		// The manager reports job notices to the session, as it does in production.
+		jm := jobs.NewManager(p.Sink)
 		f.mu.Lock()
 		f.managers = append(f.managers, jm)
 		f.mu.Unlock()

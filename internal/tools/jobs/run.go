@@ -88,7 +88,7 @@ func (m *Manager) launchJob(ctx context.Context, j *Job, run func(context.Contex
 		// An observable terminal status must imply its completion is already
 		// queued: Wait only blocks on Running jobs, so recording second would let
 		// a drain race ahead of the bookkeeping.
-		ev := m.recordCompletion(parentSession, id, kind, label, resultRef, st, err)
+		ev, emit := m.recordCompletion(parentSession, id, kind, label, resultRef, st, err)
 
 		j.mu.Lock()
 		if j.status != Killed && j.status != Interrupted { // a status published on cancel stands
@@ -100,7 +100,11 @@ func (m *Manager) launchJob(ctx context.Context, j *Job, run func(context.Contex
 		}
 		j.mu.Unlock()
 		close(j.done)
-		// Only now would a woken turn's first question get "terminal".
+		// Only now would a woken turn's first question get "terminal", and only
+		// after the observer took the continuation may a client act on the notice.
 		m.publishCompletion(ev)
+		if emit {
+			m.sink.Emit(completionNotice(ev, err))
+		}
 	}()
 }

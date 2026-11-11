@@ -302,6 +302,9 @@ only to a client that declared them in its `initialize` request:
 - the matching requests, `_reasonix.io/session/status` and `_reasonix.io/session/mcpStatus`, work either way;
 - the on-disk transcript of a turn is reported as `_meta["reasonix.io"].transcriptPath` in the `session/prompt` result.
 
+The `_reasonix.io/job_completed` update described below is opt-in the same way,
+under `reasonix.io.jobCompletions`.
+
 ### When a turn fails
 
 A turn that fails after it was admitted ends `session/prompt` with a JSON-RPC
@@ -326,6 +329,93 @@ verification command ran) is not a failure and not a completion:
 - `session/prompt` returns `stopReason: "end_turn"`;
 - the response carries the typed outcome in `_meta["reasonix.io"].turnOutcome`, e.g. `{"kind": "paused", "reason": "…"}`;
 - the streamed text ends with a host-written `[paused] Not verified, …` line, so a client that reads only message text does not take the work for done.
+
+### When a turn ends with background jobs pending
+
+A turn that started background work (`bash(run_in_background=true)`) and ends
+before those jobs finish is neither complete nor failed. Reasonix reports the
+work still running in the same typed outcome:
+
+- `session/prompt` returns `stopReason: "end_turn"`;
+- `_meta["reasonix.io"].turnOutcome` is
+  `{"kind": "awaiting_jobs", "jobs": [{"id": "job-3", "command": "gh pr checks --watch", "startedAt": "2026-11-04T09:12:31Z"}]}`;
+- `command` is the recognizable command line and `startedAt` is RFC3339;
+- the jobs keep running inside the Reasonix process, and the session stays open.
+
+The outcome is reported to a client that declared `jobCompletions` (below).
+Without that declaration the session keeps its older behavior: a finished job
+starts the follow-up turn itself, and the turn outcome stays `completed`.
+
+A client may release the agent — and whatever slot it holds — once it sees
+`awaiting_jobs`, then resume the session when the work ends.
+
+#### Completion update
+
+A client that declares
+`{"clientCapabilities": {"_meta": {"reasonix.io": {"jobCompletions": {"supported": true}}}}}`
+receives one `session/update` per finished job:
+
+```json
+{
+  "method": "session/update",
+  "params": {
+    "sessionId": "session-id",
+    "update": {
+      "sessionUpdate": "_reasonix.io/job_completed",
+      "_meta": {
+        "reasonix.io": {
+          "jobCompleted": {
+            "schemaVersion": 1,
+            "jobId": "job-3",
+            "kind": "bash",
+            "label": "PR checks",
+            "status": "done",
+            "exitCode": 0,
+            "durationMs": 184203,
+            "outputTail": "All checks passed",
+            "level": "info",
+            "completedAt": "2026-11-04T09:15:35Z"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+- `status` is `done`, `failed`, `killed`, or `interrupted`;
+- `exitCode` or `signal` is present when the job reported one;
+- `durationMs` is wall time from start to finish;
+- `outputTail` is at most 2000 bytes from the end of the job's output;
+- `level` is `info` for a finished job and `warn` for one that failed, so a
+  client can style the row without parsing `status`;
+- the declaration also hands turn admission to the client: a completion that
+  arrives while the session is idle waits for the client's next prompt instead
+  of starting a turn on its own;
+- the update is a vendor extension: a client that did not declare
+  `jobCompletions` receives nothing, keeps the automatic wake-up turn, and keeps
+  reading results with `wait` or `bash_output`.
+
+A completion that cannot be delivered — the client disconnected, or the write
+failed — is queued in the session's ACP sidecar (at most 32, newest kept) and
+delivered in order on the next `session/load`, `session/resume`, or
+`session/prompt`. A redelivery does not repeat a completion the client already
+received.
+
+#### Resume after a completion
+
+The completion is also queued as a host continuation holding the job's ending
+and bounded output tail, so the model does not have to read it back by hand. To
+let it continue, send `session/prompt` with an empty prompt:
+
+- the turn first delivers any undelivered `job_completed` updates, then runs the
+  queued continuation;
+- an empty prompt is admitted only while a host continuation is queued or a
+  completion is still undelivered; otherwise it remains `-32602`;
+- an inbox the person paused stays paused — an empty prompt does not resume it.
+
+`wait` with no pending jobs remains a no-op, so a client that resumes the
+ordinary way needs no special casing.
 
 ## Mid-turn steering extension
 
@@ -533,6 +623,7 @@ any other slash command.
 | --- | --- | --- |
 | Existing ACP v1 methods | Their names and response shapes are unchanged. | Compatible |
 | Capability `_meta` | Unknown metadata may be ignored. | Compatible |
+| Vendor job updates | Undeclared clients receive no `job_completed`; prompt results gain only an optional `_meta` outcome. | Compatible |
 | Persisted transcripts | Transcript schema is unchanged; the inbox is a versioned sidecar. | Compatible |
 | CLI and Desktop steering | Rejected steers remain durable follow-ups. | Compatible |
 
@@ -553,5 +644,7 @@ earlier prefix remains reusable.
    is active.
 6. Branch on the steer `disposition`; both accepted steer and queued follow-up
    are durable, but only the former can affect the active turn.
-7. Use `session/close` for resource cleanup and `session/delete` only when the
+7. Treat `turnOutcome.kind == "awaiting_jobs"` as a resumable end of turn, and
+   declare `jobCompletions` if the client wants to be woken by the result.
+8. Use `session/close` for resource cleanup and `session/delete` only when the
    user intends to remove persisted history.

@@ -272,6 +272,11 @@ type acpSession struct {
 	// maintenanceDone is non-nil while session-owned maintenance, such as an
 	// idle config rebuild, is in flight outside mu.
 	maintenanceDone chan struct{}
+	// pendingJobs are job_completed updates the client has not received yet,
+	// because the transport refused them or it was not connected when the job
+	// ended. They are also persisted with the session meta, so a restart can
+	// still deliver them on the next load. Guarded by mu.
+	pendingJobs []ReasonixJobCompleted
 }
 
 func (s *acpSession) begin(ctx context.Context) (context.Context, context.CancelFunc, bool) {
@@ -548,6 +553,7 @@ func (s *service) openExistingSession(ctx context.Context, method, id, cwdParam 
 	sink := newUpdateSink(s.conn, id)
 	sink.bindCwd(cwd)
 	sink.bindExtensionSurface(s.extensionSurfaceSupported())
+	sink.bindJobCompletions(s.jobCompletionsSupported())
 	sink.bindElicitation(s.clientCapabilities())
 	sessionParams := SessionParams{
 		Cwd:                cwd,
@@ -643,6 +649,8 @@ func (s *service) openExistingSession(ctx context.Context, method, id, cwdParam 
 		lease:          lease,
 	}
 	s.bindSessionHealthEvents(sess)
+	sink.bindJobs(func() any { return sess.currentCtrl() }, sess.queueJobCompletion)
+	sess.pendingJobs = append([]ReasonixJobCompleted(nil), meta.PendingJobCompletions...)
 	if err := saveACPMeta(path, sess.meta()); err != nil {
 		sess.releaseSessionLease()
 		ctrl.Close()
@@ -800,6 +808,7 @@ func (s *service) reloadSessionExtensionsLocked(ctx context.Context, sess *acpSe
 	if err != nil {
 		return nil, &RPCError{Code: ErrInternal, Message: sessionReloadExtensionsMethod + ": " + err.Error()}
 	}
+	newCtrl = adoptSessionPolicy(newCtrl, sink)
 	newCtrl.EnableInteractiveApproval()
 	// Config on disk may have changed the effective planner/sandbox posture;
 	// recompute the status snapshot from the same resolved inputs.
@@ -1018,6 +1027,7 @@ func (s *service) rebuildSessionLocked(ctx context.Context, sess *acpSession, cf
 	if err != nil {
 		return &RPCError{Code: ErrInternal, Message: "session config: " + err.Error()}
 	}
+	newCtrl = adoptSessionPolicy(newCtrl, sink)
 	newCtrl.EnableInteractiveApproval()
 	runtimeState, err := s.sessionRuntimeState(ctx, SessionRuntimeStateParams{
 		Cwd: cwd, Model: cfgState.Model, RuntimeProfile: cfgState.RuntimeProfile, AdditionalDirs: sess.additionalDirs,
@@ -1403,6 +1413,10 @@ type acpSessionMeta struct {
 	// behind so restart-time lookups (resolveTranscriptPath) follow the
 	// session instead of reopening the pre-recovery file.
 	ActiveTranscript string `json:"activeTranscript,omitempty"`
+	// PendingJobCompletions are job_completed updates a disconnected client has
+	// not received yet. They are delivered on the next session/load, resume, or
+	// prompt, then dropped.
+	PendingJobCompletions []ReasonixJobCompleted `json:"pendingJobCompletions,omitempty"`
 }
 
 func (m acpSessionMeta) info(extra map[string]any) SessionInfo {

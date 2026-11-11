@@ -47,17 +47,18 @@ func (s *acpSession) meta() acpSessionMeta {
 
 func (s *acpSession) metaLocked() acpSessionMeta {
 	return acpSessionMeta{
-		SessionID:         s.id,
-		Cwd:               s.cwd,
-		Model:             s.model,
-		EffortOverride:    cloneStringPtr(s.effortOverride),
-		RuntimeProfile:    s.runtimeProfile,
-		ToolApprovalMode:  firstNonEmpty(s.posture.kept, normalizeACPToolApprovalMode(s.posture.mode)),
-		CollaborationMode: normalizeACPCollaborationMode(s.modeID),
-		Title:             s.title,
-		CreatedAt:         s.createdAt,
-		UpdatedAt:         s.updatedAt,
-		Status:            s.status.persisted(),
+		SessionID:             s.id,
+		Cwd:                   s.cwd,
+		Model:                 s.model,
+		EffortOverride:        cloneStringPtr(s.effortOverride),
+		RuntimeProfile:        s.runtimeProfile,
+		ToolApprovalMode:      firstNonEmpty(s.posture.kept, normalizeACPToolApprovalMode(s.posture.mode)),
+		CollaborationMode:     normalizeACPCollaborationMode(s.modeID),
+		Title:                 s.title,
+		CreatedAt:             s.createdAt,
+		UpdatedAt:             s.updatedAt,
+		Status:                s.status.persisted(),
+		PendingJobCompletions: append([]ReasonixJobCompleted(nil), s.pendingJobs...),
 	}
 }
 

@@ -138,9 +138,11 @@ func (m *Manager) ackCompletion(eventID string) {
 }
 
 // recordCompletion queues the finished-job summary for DrainCompletedNote and
-// emits a closing Notice. It returns the event publishCompletion hands on; a
-// zero event means nothing was queued and there is nothing to publish.
-func (m *Manager) recordCompletion(parentSession, id, kind, label, resultRef string, st Status, err error) CompletionEvent {
+// returns the event publishCompletion hands on, plus whether the closing Notice
+// should be emitted. The caller emits it only after the observer took the
+// durable continuation, so a client that reacts to the notice finds the result
+// already resumable. A zero event means nothing was queued.
+func (m *Manager) recordCompletion(parentSession, id, kind, label, resultRef string, st Status, err error) (CompletionEvent, bool) {
 	tag := id
 	if label != "" {
 		tag = fmt.Sprintf("%s (%s)", id, label)
@@ -155,7 +157,7 @@ func (m *Manager) recordCompletion(parentSession, id, kind, label, resultRef str
 	m.mu.Lock()
 	if parentSession != "" && m.destroying[parentSession] {
 		m.mu.Unlock()
-		return CompletionEvent{}
+		return CompletionEvent{}, false
 	}
 	m.completed = append(m.completed, completion{
 		sessionID: parentSession,
@@ -169,28 +171,29 @@ func (m *Manager) recordCompletion(parentSession, id, kind, label, resultRef str
 	if !nilutil.IsNil(m.taskRecorder) {
 		m.taskRecorder.RecordDone(id, st, err)
 	}
+	return ev, shouldEmit
+}
 
+// completionNotice is the closing display event for a terminal job.
+func completionNotice(ev CompletionEvent, err error) event.Event {
 	ne := event.Event{Kind: event.Notice, Level: event.LevelInfo, Code: event.NoticeCodeJobFinished,
-		Text: fmt.Sprintf("background %s finished: %s", kind, id)}
-	payload := event.JobNotice{Kind: kind, ID: id, Label: label}.Encode()
-	switch st {
+		Text: fmt.Sprintf("background %s finished: %s", ev.Kind, ev.JobID)}
+	payload := event.JobNotice{Kind: ev.Kind, ID: ev.JobID, Label: ev.Label}.Encode()
+	switch ev.Status {
 	case Failed:
 		ne.Level, ne.Code = event.LevelWarn, event.NoticeCodeJobFailed
-		ne.Text = fmt.Sprintf("background %s failed: %s — %v", kind, id, err)
-		failed := event.JobNotice{Kind: kind, ID: id, Label: label, Error: fmt.Sprint(err)}
+		ne.Text = fmt.Sprintf("background %s failed: %s — %v", ev.Kind, ev.JobID, err)
+		failed := event.JobNotice{Kind: ev.Kind, ID: ev.JobID, Label: ev.Label, Error: fmt.Sprint(err)}
 		if ex, ok := exitOf(err); ok {
 			failed.ExitCode, failed.Signal = &ex.Code, ex.Signal
 		}
 		ne.Detail = failed.Encode()
 	case Killed:
 		ne.Code = event.NoticeCodeJobKilled
-		ne.Text = fmt.Sprintf("background %s killed: %s", kind, id)
+		ne.Text = fmt.Sprintf("background %s killed: %s", ev.Kind, ev.JobID)
 		ne.Detail = payload
 	default:
 		ne.Detail = payload
 	}
-	if shouldEmit {
-		m.sink.Emit(ne)
-	}
-	return ev
+	return ne
 }

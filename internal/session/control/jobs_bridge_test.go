@@ -304,7 +304,7 @@ func TestUnappliedHostSteerKeepsHostAttribution(t *testing.T) {
 // typed — which is how rows of literal <background-jobs> filled the queue
 // panel until it had pushed the transcript off the screen.
 func TestBackgroundCompletionDisplayCarriesNoHostMarkup(t *testing.T) {
-	display, submit := backgroundCompletionTexts(backgroundJobEvent("task-7"))
+	display, submit := backgroundCompletionTexts(backgroundJobEvent("task-7"), jobs.View{}, jobs.Peek{})
 	if strings.ContainsAny(display, "<>") {
 		t.Errorf("display = %q, want no markup", display)
 	}
@@ -313,6 +313,50 @@ func TestBackgroundCompletionDisplayCarriesNoHostMarkup(t *testing.T) {
 	}
 	if !strings.Contains(submit, "<background-jobs>") || !strings.Contains(submit, display) {
 		t.Errorf("submit = %q, want the tagged block around %q", submit, display)
+	}
+}
+
+// The continuation carries the ending the model would otherwise read back
+// through wait: the exit status, how long it ran, and a bounded output tail.
+func TestBackgroundCompletionTextCarriesTheEnding(t *testing.T) {
+	exit := 2
+	display, submit := backgroundCompletionTexts(backgroundJobEvent("task-8"), jobs.View{
+		ID: "task-8", Status: string(jobs.Failed), ExitCode: &exit,
+		StartedAt: 1_000, EndedAt: 62_000,
+	}, jobs.Peek{Text: "go: build failed\n"})
+	if display != "task-8 (backend sweep) — done" {
+		t.Errorf("display = %q, want the plain fact", display)
+	}
+	for _, want := range []string{"exit 2", "in 1m1s", "last output:\ngo: build failed", "</background-jobs>"} {
+		if !strings.Contains(submit, want) {
+			t.Errorf("submit = %q, want %q", submit, want)
+		}
+	}
+	if strings.Contains(display, "exit 2") {
+		t.Errorf("display = %q, want the queue row without the ending", display)
+	}
+}
+
+// An external frontend owns turn admission: the completion becomes a durable
+// host continuation but nothing runs until the frontend submits it.
+func TestExternalBackgroundResumeWaitsForTheFrontend(t *testing.T) {
+	c, runner, _ := newInboxDispatchController(t)
+	c.SetExternalBackgroundResume(true)
+	if err := c.OnJobCompletion(context.Background(), backgroundJobEvent("task-ext")); err != nil {
+		t.Fatalf("OnJobCompletion = %v, want nil", err)
+	}
+	select {
+	case got := <-runner.inputs:
+		t.Fatalf("external resume ran %q without the frontend asking", got)
+	case <-time.After(200 * time.Millisecond):
+	}
+	st, err := c.ensureInbox()
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := st.Snapshot().Items
+	if len(items) != 1 || !items[0].Origin.IsHost() || items[0].State != sessioninbox.StateQueued {
+		t.Fatalf("queued items = %+v, want one queued host continuation", items)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"reasonix/internal/runtime/taskmonitor"
 	"reasonix/internal/state/sessioninbox"
@@ -60,6 +61,17 @@ func (c *Controller) TakeOverJobs() {
 	c.observeJobs(c.taskStore)
 }
 
+// SetExternalBackgroundResume leaves the turn a finished background job would
+// open to the frontend. The completion still becomes a durable host
+// continuation; it just waits for the frontend to run it through its own turn
+// admission, which is what an ACP client needs to keep control of the slot.
+func (c *Controller) SetExternalBackgroundResume(external bool) {
+	if c == nil {
+		return
+	}
+	c.externalBackgroundResume.Store(external)
+}
+
 // OnJobCompletion implements jobs.CompletionObserver: a terminal background job
 // gives its session a turn instead of waiting for the user's next message. An
 // error means the event never reached the durable queue, and the manager's own
@@ -84,18 +96,35 @@ func (c *Controller) OnJobCompletion(_ context.Context, ev jobs.CompletionEvent)
 	if c.hostContinuationPending() {
 		return fmt.Errorf("control: job %s folds into a queued continuation", ev.JobID)
 	}
-	display, submit := backgroundCompletionTexts(ev)
+	display, submit := c.completionTexts(ev)
 	if submit == "" {
 		return fmt.Errorf("control: job %s produced no continuation", ev.JobID)
 	}
-	_, err := c.EnqueueHostContinuation(InboxRequest{
+	_, err := c.enqueueHostContinuation(InboxRequest{
 		Display:     display,
 		Submit:      submit,
 		Source:      hostContinuationSource,
 		Idempotency: ev.ID,
-	})
+	}, !c.externalBackgroundResume.Load())
 	return err
 }
+
+// completionTexts is the host's account of what finished, with the result the
+// model would otherwise have to read back through wait. The job's own output is
+// bounded: a continuation is context the model pays for, not a transcript.
+func (c *Controller) completionTexts(ev jobs.CompletionEvent) (display, submit string) {
+	var view jobs.View
+	for _, ended := range c.EndedJobs() {
+		if ended.ID == ev.JobID {
+			view = ended
+			break
+		}
+	}
+	peek, _ := c.JobPeek(ev.JobID, completionOutputBytes)
+	return backgroundCompletionTexts(ev, view, peek)
+}
+
+const completionOutputBytes = 2_000
 
 // hostContinuationPending reports whether a runtime-authored continuation is
 // still waiting for a turn to read it. Consumed and running items are past
@@ -120,6 +149,13 @@ func (c *Controller) hostContinuationPending() bool {
 // steer attempt itself, whose refusal converts the item and kicks the
 // dispatcher. A nil error means durable, not read.
 func (c *Controller) EnqueueHostContinuation(req InboxRequest) (sessioninbox.InboxReceipt, error) {
+	return c.enqueueHostContinuation(req, true)
+}
+
+// enqueueHostContinuation is EnqueueHostContinuation with the wake-up made
+// explicit. wake=false keeps the item durable and steerable but leaves the
+// dispatcher alone, so a frontend that owns turn admission can submit it.
+func (c *Controller) enqueueHostContinuation(req InboxRequest, wake bool) (sessioninbox.InboxReceipt, error) {
 	req.Intent = sessioninbox.IntentSteer
 	req.Origin = sessioninbox.OriginHost
 	rec, err := c.EnqueueInbox(req)
@@ -129,10 +165,13 @@ func (c *Controller) EnqueueHostContinuation(req InboxRequest) (sessioninbox.Inb
 	if rec.Idempotent {
 		return rec, nil
 	}
-	steered, steerErr := c.TrySteerInboxItem(rec.ItemID)
+	steered, steerErr := c.steerInboxItem(rec.ItemID, false, wake)
 	if steerErr != nil {
-		// Durable and still queued: delivery is the dispatcher's now.
-		c.maybeDispatchInbox()
+		// Durable and still queued: delivery is the dispatcher's now, unless the
+		// frontend asked to run it through its own turn admission.
+		if wake {
+			c.maybeDispatchInbox()
+		}
 		return rec, nil
 	}
 	return steered, nil
@@ -143,7 +182,7 @@ func (c *Controller) EnqueueHostContinuation(req InboxRequest) (sessioninbox.Inb
 // the transcript get the fact alone, because Display is persisted as the turn's
 // RawContent — one string for both is how <background-jobs> markup reached the
 // pending-queue rows as if the user had typed it.
-func backgroundCompletionTexts(ev jobs.CompletionEvent) (display, submit string) {
+func backgroundCompletionTexts(ev jobs.CompletionEvent, view jobs.View, peek jobs.Peek) (display, submit string) {
 	tag := ev.JobID
 	if ev.Label != "" {
 		tag = fmt.Sprintf("%s (%s)", ev.JobID, ev.Label)
@@ -152,11 +191,27 @@ func backgroundCompletionTexts(ev jobs.CompletionEvent) (display, submit string)
 		return "", ""
 	}
 	display = fmt.Sprintf("%s — %s", tag, ev.Status)
+	ending := display
+	if view.ExitCode != nil {
+		ending += fmt.Sprintf(", exit %d", *view.ExitCode)
+	}
+	if view.EndedAt > 0 && view.StartedAt > 0 && view.EndedAt >= view.StartedAt {
+		ending += fmt.Sprintf(" in %s", (time.Duration(view.EndedAt-view.StartedAt) * time.Millisecond).Round(time.Second))
+	}
 	var b strings.Builder
 	b.WriteString("<background-jobs>\n")
-	b.WriteString(display + "\n")
+	b.WriteString(ending + "\n")
+	if tail := strings.TrimSpace(peek.Text); tail != "" {
+		b.WriteString("last output:\n")
+		b.WriteString(tail)
+		if !strings.HasSuffix(tail, "\n") {
+			b.WriteString("\n")
+		}
+	} else {
+		b.WriteString("It produced no output.\n")
+	}
 	b.WriteString("</background-jobs>\n\n")
-	b.WriteString("A background job you started has finished. Read its result with wait or bash_output, then continue the work it was part of. Do not redo what it already did, and end the turn if nothing is left to do.")
+	b.WriteString("A background job you started has finished; its result is above. Continue the work it was part of. Read more with wait or bash_output only if the tail is not enough, do not redo what it already did, and end the turn if nothing is left to do.")
 	return display, b.String()
 }
 

@@ -81,9 +81,20 @@ type ReasonixGoalRuntime struct {
 	BudgetExtensions int    `json:"budgetExtensions"` // Deprecated: always 0.
 }
 
+// ReasonixJobRef names one background job that outlived the turn, so a client
+// knows what the session is waiting on before it parks the agent.
+type ReasonixJobRef struct {
+	ID        string `json:"id"`
+	Command   string `json:"command,omitempty"`
+	StartedAt string `json:"startedAt,omitempty"`
+}
+
 type ReasonixTurnOutcome struct {
 	Kind   string `json:"kind"`
 	Reason string `json:"reason,omitempty"`
+	// Jobs is set only for kind "awaiting_jobs": the work still running when a
+	// turn ended cleanly. An empty list means the turn really is over.
+	Jobs []ReasonixJobRef `json:"jobs,omitempty"`
 }
 
 type ReasonixFinalReadiness struct {
@@ -354,6 +365,15 @@ func (t *statusTelemetry) onEvent(e event.Event) (string, bool) {
 }
 
 func (t *statusTelemetry) finishTurn(runErr error, cancelled bool, goalStatus, summary string) string {
+	return t.finishTurnWithJobs(runErr, cancelled, goalStatus, summary, nil)
+}
+
+// finishTurnWithJobs is finishTurn for a turn that may have left background
+// jobs running. A clean end with jobs pending is awaiting_jobs rather than
+// completed: the model stopped talking, but the work it handed off has not
+// finished, and a client that took "completed" literally would close the
+// ticket while CI still runs.
+func (t *statusTelemetry) finishTurnWithJobs(runErr error, cancelled bool, goalStatus, summary string, awaiting []ReasonixJobRef) string {
 	eventName := "completion"
 	t.mutate(func(t *statusTelemetry) {
 		t.state = "idle"
@@ -367,13 +387,25 @@ func (t *statusTelemetry) finishTurn(runErr error, cancelled bool, goalStatus, s
 			t.goalOverride = "cancelled"
 			eventName = "completion"
 		case runErr == nil && goalStatus == control.GoalStatusComplete:
-			t.phase = "review_ready"
-			t.turnOutcome = ReasonixTurnOutcome{Kind: "completed"}
-			t.finalReadiness.ReadyForReview = true
+			if len(awaiting) > 0 {
+				t.phase = "awaiting_jobs"
+				t.turnOutcome = ReasonixTurnOutcome{Kind: "awaiting_jobs", Jobs: awaiting}
+				eventName = "pause"
+			} else {
+				t.phase = "review_ready"
+				t.turnOutcome = ReasonixTurnOutcome{Kind: "completed"}
+				t.finalReadiness.ReadyForReview = true
+			}
 		case runErr == nil && (goalStatus == "" || goalStatus == control.GoalStatusStopped):
-			t.phase = "completed"
-			t.turnOutcome = ReasonixTurnOutcome{Kind: "completed"}
-			t.finalReadiness.ReadyForReview = true
+			if len(awaiting) > 0 {
+				t.phase = "awaiting_jobs"
+				t.turnOutcome = ReasonixTurnOutcome{Kind: "awaiting_jobs", Jobs: awaiting}
+				eventName = "pause"
+			} else {
+				t.phase = "completed"
+				t.turnOutcome = ReasonixTurnOutcome{Kind: "completed"}
+				t.finalReadiness.ReadyForReview = true
+			}
 		case goalStatus == control.GoalStatusBlocked:
 			t.phase = "paused"
 			t.turnOutcome = ReasonixTurnOutcome{Kind: "paused", Reason: "goal blocked"}
@@ -522,6 +554,7 @@ func (t *statusTelemetry) snapshot() statusTelemetrySnapshot {
 		phase:    t.phase,
 		turnOutcome: ReasonixTurnOutcome{
 			Kind: t.turnOutcome.Kind, Reason: clipStatusText(t.turnOutcome.Reason, 2_048),
+			Jobs: append([]ReasonixJobRef(nil), t.turnOutcome.Jobs...),
 		},
 		finalReadiness: ReasonixFinalReadiness{
 			ReadyForReview: t.finalReadiness.ReadyForReview,
@@ -606,7 +639,7 @@ func normalizePersistedStatusPhase(value string) string {
 	switch value {
 	case "idle", "starting", "planning", "working", "implementing",
 		"waiting_permission", "waiting_input", "checking_readiness",
-		"cancelled", "review_ready", "completed", "paused",
+		"cancelled", "review_ready", "completed", "awaiting_jobs", "paused",
 		"readiness_paused", "recovery_paused", "error":
 		return value
 	default:

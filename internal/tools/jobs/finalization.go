@@ -62,7 +62,7 @@ func (m *Manager) finishUninvokedJob(j *Job, st Status, cause error) {
 	}
 	resultRef := j.artifactRefLocked()
 	j.mu.Unlock()
-	ev := m.recordCompletion(j.SessionID, j.ID, j.Kind, j.Label, resultRef, st, err)
+	ev, emit := m.recordCompletion(j.SessionID, j.ID, j.Kind, j.Label, resultRef, st, err)
 	j.mu.Lock()
 	j.runReturned = true
 	if j.status != Killed && j.status != Interrupted {
@@ -71,4 +71,7 @@ func (m *Manager) finishUninvokedJob(j *Job, st Status, cause error) {
 	j.mu.Unlock()
 	close(j.done)
 	m.publishCompletion(ev)
+	if emit {
+		m.sink.Emit(completionNotice(ev, err))
+	}
 }

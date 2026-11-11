@@ -127,6 +127,7 @@ func (s *service) sessionNew(ctx context.Context, raw json.RawMessage) (any, err
 	sink := newUpdateSink(s.conn, id)
 	sink.bindCwd(cwd)
 	sink.bindExtensionSurface(s.extensionSurfaceSupported())
+	sink.bindJobCompletions(s.jobCompletionsSupported())
 	sink.bindElicitation(s.clientCapabilities())
 	sessionParams := SessionParams{
 		Cwd:                cwd,
@@ -144,6 +145,7 @@ func (s *service) sessionNew(ctx context.Context, raw json.RawMessage) (any, err
 	if err != nil {
 		return nil, newSessionError("session/new", err)
 	}
+	ctrl = adoptSessionPolicy(ctrl, sink)
 	ctrl.EnableInteractiveApproval()
 	ctrl.SetToolApprovalMode(startPosture)
 	sink.bindApprove(ctrl.Approve)
@@ -169,6 +171,7 @@ func (s *service) sessionNew(ctx context.Context, raw json.RawMessage) (any, err
 		updatedAt:      now,
 	}
 	s.bindSessionHealthEvents(sess)
+	sink.bindJobs(func() any { return sess.currentCtrl() }, sess.queueJobCompletion)
 	// Pin a transcript file keyed by session id when the controller has a session
 	// dir, so every turn auto-saves there, session/prompt can hand the path back,
 	// and session/load can find it again by id across process restarts. The
@@ -310,6 +313,11 @@ func (s *service) sessionLoad(ctx context.Context, raw json.RawMessage) (any, er
 			s.sendAvailableCommands(sess)
 			s.sendUsageUpdate(sess)
 			s.publishMCPStatus(sess)
+			if sess != nil {
+				// A job that ended while the client was away is delivered on the
+				// reconnect that brought it back.
+				sess.flushJobCompletions()
+			}
 		},
 	}, nil
 }
@@ -342,6 +350,9 @@ func (s *service) sessionResume(ctx context.Context, raw json.RawMessage) (any, 
 			s.sendAvailableCommands(sess)
 			s.sendUsageUpdate(sess)
 			s.publishMCPStatus(sess)
+			if sess != nil {
+				sess.flushJobCompletions()
+			}
 		},
 	}, nil
 }
@@ -363,11 +374,22 @@ func (s *service) sessionPrompt(ctx context.Context, raw json.RawMessage) (any, 
 	if err != nil {
 		return nil, &RPCError{Code: ErrInvalidParams, Message: "session/prompt: " + err.Error()}
 	}
+	// An empty prompt resumes a session parked at awaiting_jobs: the queued host
+	// continuation holds the result, and the client has nothing to type. Empty
+	// stays invalid when there is nothing to resume, so it cannot start a turn
+	// that does no work.
+	resume := false
 	if text == "" {
-		return nil, &RPCError{Code: ErrInvalidParams, Message: "session/prompt: empty prompt"}
+		if !sessionResumeReady(sess) {
+			return nil, &RPCError{Code: ErrInvalidParams, Message: "session/prompt: empty prompt"}
+		}
+		resume = true
 	}
 	rawText := text
-	text, invokedSkill := s.resolveSlashPrompt(ctx, sess, text)
+	invokedSkill := ""
+	if !resume {
+		text, invokedSkill = s.resolveSlashPrompt(ctx, sess, text)
+	}
 
 	runCtx, cancel, ok := sess.begin(ctx)
 	if !ok {
@@ -379,7 +401,10 @@ func (s *service) sessionPrompt(ctx context.Context, raw json.RawMessage) (any, 
 	sess.status.beginTurn()
 	s.publishStatus(sess, "phase")
 	sess.sink.setTurnContext(runCtx)
-	if sess.takeGoalDraftMode() {
+	// Deliver anything the client missed while it was away before the turn
+	// speaks, so the client's view is complete when it starts listening.
+	sess.flushJobCompletions()
+	if !resume && sess.takeGoalDraftMode() {
 		sess.currentCtrl().SetGoal(text)
 		sess.saveMetaIfPresent()
 	}
@@ -388,13 +413,24 @@ func (s *service) sessionPrompt(ctx context.Context, raw json.RawMessage) (any, 
 		s.finishTurn(ctx, sess)
 		cancel()
 	}()
-	runErr := drainACPInbox(runCtx, sess.ctrl, runPrompt(runCtx, sess.ctrl, text, rawText, invokedSkill))
+	var promptErr error
+	if !resume {
+		promptErr = runPrompt(runCtx, sess.ctrl, text, rawText, invokedSkill)
+	}
+	runErr := drainACPInbox(runCtx, sess.ctrl, promptErr)
+	// Only a client that asked for job completions is promised a parked turn:
+	// everyone else keeps the automatic wake-up and sees the old outcome.
+	var awaiting []ReasonixJobRef
+	if s.jobCompletionsSupported() {
+		awaiting = awaitingJobRefs(sess.currentCtrl())
+	}
 
-	statusEvent := sess.status.finishTurn(
+	statusEvent := sess.status.finishTurnWithJobs(
 		runErr,
 		runCtx.Err() != nil,
 		sess.currentCtrl().GoalStatus(),
 		finalAssistantSummary(sess.currentCtrl()),
+		awaiting,
 	)
 	s.publishStatus(sess, statusEvent)
 	s.sendUsageUpdate(sess)
@@ -416,6 +452,10 @@ func (s *service) sessionPrompt(ctx context.Context, raw json.RawMessage) (any, 
 			}
 		}
 	}
+	// The typed outcome is what a supervisor keys on: completed, paused,
+	// awaiting_jobs (with the jobs still running), or an error. stopReason alone
+	// cannot say that the turn ended with work outstanding.
+	vendor["turnOutcome"] = sess.status.snapshot().turnOutcome
 	if sess.transcript != "" {
 		vendor["transcriptPath"] = sess.transcript
 	}

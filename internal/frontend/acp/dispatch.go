@@ -70,8 +70,19 @@ type updateSink struct {
 	activeAttemptID    string
 	msgIDs             messageIDs
 	elicitModes        elicitModes
-	mu                 sync.Mutex
-	turnCtx            context.Context
+	// jobLookup resolves the session's live controller for a job notice. It is
+	// read at notice time, not bound, because an idle rebuild may have replaced
+	// the controller while the job manager stayed the session's.
+	jobLookup func() any
+	// queueJob durably queues a job completion the transport refused, for replay
+	// on the session's next load or prompt.
+	queueJob func(ReasonixJobCompleted)
+	// jobCompletions records the client's negotiated reasonix.jobCompletions
+	// support. The vendor job_completed update is opt-in like the other
+	// unsolicited vendor notifications.
+	jobCompletions bool
+	mu             sync.Mutex
+	turnCtx        context.Context
 }
 
 func newUpdateSink(conn notifier, sessionID string) *updateSink {
@@ -110,6 +121,14 @@ func (s *updateSink) bindMCPStatus(fn func()) {
 // bindExtensionSurface records whether the client negotiated structured
 // extension-surface support in the initialize handshake.
 func (s *updateSink) bindExtensionSurface(supported bool) { s.extensionSurface = supported }
+
+// bindJobCompletions records whether the client negotiated job-completion
+// updates in the initialize handshake.
+func (s *updateSink) bindJobCompletions(supported bool) {
+	s.mu.Lock()
+	s.jobCompletions = supported
+	s.mu.Unlock()
+}
 
 func (s *updateSink) setTurnContext(ctx context.Context) {
 	s.mu.Lock()
@@ -216,6 +235,13 @@ func (s *updateSink) Emit(e event.Event) {
 		})
 
 	case event.Notice:
+		// A terminal background job is its own update: the client may have
+		// parked the session when the turn ended awaiting it, and only this
+		// notice tells it the work is done.
+		switch e.Code {
+		case event.NoticeCodeJobFinished, event.NoticeCodeJobFailed, event.NoticeCodeJobKilled:
+			s.emitJobCompleted(e)
+		}
 		// Surface warnings to the host as a message chunk so they're not lost;
 		// info-level notices stay out of band.
 		if e.Level == event.LevelWarn && e.Text != "" {

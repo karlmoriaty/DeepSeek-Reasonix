@@ -23,6 +23,15 @@ func (s *service) statusUpdatesSupported() bool {
 	return clientVendorCapability(s.clientCapabilities(), "statusUpdates")
 }
 
+// jobCompletionsSupported reports whether the client declared
+// reasonix.jobCompletions, the opt-in for the _reasonix.io/job_completed
+// vendor update. The update is only useful to a client that parks a session
+// when a turn ends awaiting background jobs; undeclared clients keep the old
+// behavior of reading results through wait or bash_output.
+func (s *service) jobCompletionsSupported() bool {
+	return clientVendorCapability(s.clientCapabilities(), "jobCompletions")
+}
+
 func clientVendorCapability(caps ClientCapabilities, name string) bool {
 	vendor, ok := caps.Meta["reasonix.io"].(map[string]any)
 	if !ok {

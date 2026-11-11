@@ -46,9 +46,26 @@ func (s *service) newPersistedSession(ctx context.Context, p SessionParams, path
 	p.Composition = binding
 	ctrl, err := s.factory.NewSession(ctx, p)
 	if err != nil && binding != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-		return boot.BuildCompositionHistory(boot.Options{Composition: binding, WorkspaceRoot: p.Cwd, SessionDir: s.sessionDir(), Sink: p.Sink, Model: p.Model}, err).Controller, nil
+		return adoptSessionPolicy(boot.BuildCompositionHistory(boot.Options{Composition: binding, WorkspaceRoot: p.Cwd, SessionDir: s.sessionDir(), Sink: p.Sink, Model: p.Model}, err).Controller, p.Sink), nil
 	}
-	return ctrl, err
+	return adoptSessionPolicy(ctrl, p.Sink), err
+}
+
+// adoptSessionPolicy applies the policy an ACP session controller shares,
+// whichever path built it. A client that declared job completions learns about
+// a finished background job from its own notification and decides when the
+// session should work again, so the completion must not start a turn behind its
+// back. Clients that did not ask for those updates keep the automatic wake-up.
+//
+// The capability is read from the session's own update sink, never from the
+// service: rebuild and reload paths already hold the service lock while the
+// replacement is built.
+func adoptSessionPolicy(ctrl *control.Controller, sink event.Sink) *control.Controller {
+	updates, _ := sink.(*updateSink)
+	if ctrl != nil && updates != nil && updates.jobCompletionsSupported() {
+		ctrl.SetExternalBackgroundResume(true)
+	}
+	return ctrl
 }
 
 func compositionFromPath(path string) (*agentcomposition.Binding, error) {
@@ -124,6 +141,7 @@ func (s *service) switchComposition(ctx context.Context, sess *acpSession, cur *
 	if err != nil {
 		return err
 	}
+	next = adoptSessionPolicy(next, sess.sink)
 	if err := boot.ApplyRuntimeMigration(next, cur, boot.CaptureRuntimeMigration(cur)); err != nil {
 		next.ReleaseResources()
 		return err
